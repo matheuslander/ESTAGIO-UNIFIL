@@ -1,0 +1,18 @@
+# IntelliJ / IDE
+.idea/
+.vscode/
+
+# Backend Java / Maven
+target/
+backend/target/
+
+# Frontend Node / React / Electron
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Ambiente e logs
+.env
+*.log
+.DS_Store
