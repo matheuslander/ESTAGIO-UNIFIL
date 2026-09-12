@@ -1,5 +1,6 @@
 package br.com.uniaoacabamentos.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
@@ -18,12 +19,32 @@ public class Obra {
     private String endereco;
     private String descricao;
     private Double metragem;
-    private BigDecimal valorOrcamento = BigDecimal.ZERO;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal valorContratado;
+    private String nomeMontador;
+    @Column(precision = 19, scale = 2)
+    private BigDecimal valorMontador;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private StatusObra status = StatusObra.CADASTRADA;
+    private Boolean ativo = true;
     private LocalDateTime dataInicio;
+    private LocalDateTime dataFinalizacao;
     private LocalDateTime dataCriacao = LocalDateTime.now();
+
+    @JsonIgnore
+    @OneToOne(mappedBy = "obra", fetch = FetchType.LAZY)
+    private Orcamento orcamento;
+
+    @JsonIgnore
+    @OneToOne(mappedBy = "obraMontador", fetch = FetchType.LAZY)
+    private Orcamento orcamentoMontador;
+
+    @PrePersist
+    public void prePersist() {
+        if (ativo == null) ativo = true;
+        if (dataCriacao == null) dataCriacao = LocalDateTime.now();
+    }
 
     public Long getId() {
         return id;
@@ -73,13 +94,17 @@ public class Obra {
         this.metragem = metragem;
     }
 
-    public BigDecimal getValorOrcamento() {
-        return valorOrcamento;
+    public BigDecimal getMetragemM2() {
+        return metragem == null ? null : BigDecimal.valueOf(metragem);
     }
 
-    public void setValorOrcamento(BigDecimal valorOrcamento) {
-        this.valorOrcamento = valorOrcamento;
-    }
+    public BigDecimal getValorContratado() { return valorContratado; }
+    public void setValorContratado(BigDecimal valorContratado) { this.valorContratado = valorContratado; }
+    public String getNomeMontador() { return nomeMontador; }
+    public void setNomeMontador(String nomeMontador) { this.nomeMontador = nomeMontador; }
+    public BigDecimal getValorMontador() { return valorMontador; }
+    public void setValorMontador(BigDecimal valorMontador) { this.valorMontador = valorMontador; }
+
 
     public StatusObra getStatus() {
         return status;
@@ -87,6 +112,14 @@ public class Obra {
 
     public void setStatus(StatusObra status) {
         this.status = status;
+    }
+
+    public Boolean getAtivo() {
+        return ativo;
+    }
+
+    public void setAtivo(Boolean ativo) {
+        this.ativo = ativo;
     }
 
     public LocalDateTime getDataInicio() {
@@ -97,6 +130,9 @@ public class Obra {
         this.dataInicio = dataInicio;
     }
 
+    public LocalDateTime getDataFinalizacao() { return dataFinalizacao; }
+    public void setDataFinalizacao(LocalDateTime dataFinalizacao) { this.dataFinalizacao = dataFinalizacao; }
+
     public LocalDateTime getDataCriacao() {
         return dataCriacao;
     }
@@ -104,4 +140,15 @@ public class Obra {
     public void setDataCriacao(LocalDateTime dataCriacao) {
         this.dataCriacao = dataCriacao;
     }
+
+    public Orcamento getOrcamento() {
+        return orcamento;
+    }
+
+    public void setOrcamento(Orcamento orcamento) {
+        this.orcamento = orcamento;
+    }
+
+    public Orcamento getOrcamentoMontador() { return orcamentoMontador; }
+    public void setOrcamentoMontador(Orcamento orcamentoMontador) { this.orcamentoMontador = orcamentoMontador; }
 }

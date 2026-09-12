@@ -1,94 +1,114 @@
 package br.com.uniaoacabamentos.config;
 
-import br.com.uniaoacabamentos.model.Material;
-import br.com.uniaoacabamentos.model.Obra;
-import br.com.uniaoacabamentos.model.StatusObra;
 import br.com.uniaoacabamentos.model.TipoUsuario;
+import br.com.uniaoacabamentos.model.StatusUsuario;
 import br.com.uniaoacabamentos.model.Usuario;
 import br.com.uniaoacabamentos.repository.MaterialRepository;
 import br.com.uniaoacabamentos.repository.ObraRepository;
 import br.com.uniaoacabamentos.repository.UsuarioRepository;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
-import java.math.BigDecimal;
-
+/**
+ * Carga de dados exclusivamente para desenvolvimento e demonstracao academica.
+ * Pode ser desativada com UNICONTROL_DEV_DATA_ENABLED=false.
+ */
 @Component
+@Order(Ordered.HIGHEST_PRECEDENCE + 1)
+@ConditionalOnProperty(
+        name = "unicontrol.dev-data.enabled",
+        havingValue = "true",
+        matchIfMissing = true
+)
 public class DataLoader implements CommandLineRunner {
     private final UsuarioRepository usuarioRepository;
     private final MaterialRepository materialRepository;
     private final ObraRepository obraRepository;
     private final PasswordEncoder passwordEncoder;
+    private final String adminLogin;
+    private final String adminPassword;
+    private final String userLogin;
+    private final String userPassword;
 
     public DataLoader(UsuarioRepository usuarioRepository,
                       MaterialRepository materialRepository,
                       ObraRepository obraRepository,
-                      PasswordEncoder passwordEncoder) {
+                      PasswordEncoder passwordEncoder,
+                      @Value("${unicontrol.dev-data.admin.login:admin}") String adminLogin,
+                      @Value("${unicontrol.dev-data.admin.password:admin123}") String adminPassword,
+                      @Value("${unicontrol.dev-data.user.login:usuario}") String userLogin,
+                      @Value("${unicontrol.dev-data.user.password:usuario123}") String userPassword) {
         this.usuarioRepository = usuarioRepository;
         this.materialRepository = materialRepository;
         this.obraRepository = obraRepository;
         this.passwordEncoder = passwordEncoder;
+        this.adminLogin = adminLogin;
+        this.adminPassword = adminPassword;
+        this.userLogin = userLogin;
+        this.userPassword = userPassword;
     }
 
     public void run(String... args) {
         if (usuarioRepository.count() == 0) {
             Usuario admin = new Usuario();
             admin.setNome("Administrador");
-            admin.setLogin("admin");
-            admin.setSenha(passwordEncoder.encode("admin123"));
+            admin.setLogin(adminLogin.trim().toLowerCase());
+            admin.setSenha(passwordEncoder.encode(adminPassword));
             admin.setTipoUsuario(TipoUsuario.ADMINISTRADOR);
+            admin.setAtivo(true);
             usuarioRepository.save(admin);
 
             Usuario comum = new Usuario();
             comum.setNome("Usuário Comum");
-            comum.setLogin("usuario");
-            comum.setSenha(passwordEncoder.encode("usuario123"));
-            comum.setTipoUsuario(TipoUsuario.USUARIO_COMUM);
+            comum.setLogin(userLogin.trim().toLowerCase());
+            comum.setSenha(passwordEncoder.encode(userPassword));
+            comum.setTipoUsuario(TipoUsuario.USUARIO);
+            comum.setAtivo(true);
             usuarioRepository.save(comum);
         } else {
             usuarioRepository.findAll().forEach(usuario -> {
+                boolean alterado = false;
                 if (!isSenhaComHash(usuario.getSenha())) {
                     usuario.setSenha(passwordEncoder.encode(usuario.getSenha()));
-                    usuarioRepository.save(usuario);
+                    alterado = true;
                 }
+                if (usuario.getAtivo() == null) {
+                    usuario.setAtivo(true);
+                    alterado = true;
+                }
+                if (!usuario.temStatusPersistido()) {
+                    usuario.setStatus(Boolean.FALSE.equals(usuario.getAtivo())
+                            ? StatusUsuario.INATIVO : StatusUsuario.ATIVO);
+                    alterado = true;
+                }
+                if (usuario.getTipoUsuario() == TipoUsuario.USUARIO_COMUM) {
+                    usuario.setTipoUsuario(TipoUsuario.USUARIO);
+                    alterado = true;
+                }
+                if (alterado) usuarioRepository.save(usuario);
             });
         }
 
-        if (materialRepository.count() == 0) {
-            Material piso = new Material();
-            piso.setNome("Piso Vinílico");
-            piso.setDescricao("Piso vinílico para obras.");
-            piso.setMarca("Durafloor");
-            piso.setCor("Carvalho");
-            piso.setQuantidade(80);
-            piso.setEstoqueMinimo(20);
-            piso.setValorCusto(new BigDecimal("45.90"));
-            piso.setValorVenda(new BigDecimal("69.90"));
-            materialRepository.save(piso);
+        materialRepository.findAll().forEach(material -> {
+            boolean alterado = material.migrarDimensoesLegadas();
+            if (material.getAtivo() == null) {
+                material.setAtivo(true);
+                alterado = true;
+            }
+            if (alterado) materialRepository.save(material);
+        });
 
-            Material la = new Material();
-            la.setNome("Lã de Vidro");
-            la.setDescricao("Isolamento acústico.");
-            la.setMarca("Isover");
-            la.setCor("Amarela");
-            la.setQuantidade(8);
-            la.setEstoqueMinimo(10);
-            la.setValorCusto(new BigDecimal("25.00"));
-            la.setValorVenda(new BigDecimal("39.90"));
-            materialRepository.save(la);
-        }
-
-        if (obraRepository.count() == 0) {
-            Obra obra = new Obra();
-            obra.setNomeObra("Apartamento Centro");
-            obra.setNomeCliente("João Silva");
-            obra.setEndereco("Rua Exemplo, 123");
-            obra.setDescricao("Instalação de piso vinílico.");
-            obra.setMetragem(65.0);
-            obra.setStatus(StatusObra.EM_ANDAMENTO);
-            obraRepository.save(obra);
-        }
+        obraRepository.findAll().forEach(obra -> {
+            if (obra.getAtivo() == null) {
+                obra.setAtivo(true);
+                obraRepository.save(obra);
+            }
+        });
     }
 
     private boolean isSenhaComHash(String senha) {

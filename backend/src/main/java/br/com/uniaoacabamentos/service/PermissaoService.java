@@ -4,6 +4,8 @@ import br.com.uniaoacabamentos.model.TipoMovimentacao;
 import br.com.uniaoacabamentos.model.TipoUsuario;
 import br.com.uniaoacabamentos.model.Usuario;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class PermissaoService {
@@ -12,12 +14,14 @@ public class PermissaoService {
     }
 
     public void exigirAdministrador(Usuario usuario) {
-        if (!isAdministrador(usuario)) throw new RuntimeException("Ação permitida apenas para administrador.");
+        if (!isAdministrador(usuario)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Ação permitida apenas para administrador.");
+        }
     }
 
     public void validarMovimentacao(Usuario usuario, TipoMovimentacao tipo) {
         if (tipo == TipoMovimentacao.ENTRADA && !isAdministrador(usuario)) {
-            throw new RuntimeException("Usuário comum não pode registrar entrada de materiais.");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Usuário comum não pode registrar entrada de materiais.");
         }
     }
 }

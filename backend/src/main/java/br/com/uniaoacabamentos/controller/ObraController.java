@@ -1,8 +1,11 @@
 package br.com.uniaoacabamentos.controller;
 
+import br.com.uniaoacabamentos.dto.ObraRequest;
+import br.com.uniaoacabamentos.dto.ObraResponse;
 import br.com.uniaoacabamentos.dto.StatusRequest;
-import br.com.uniaoacabamentos.model.*;
+import br.com.uniaoacabamentos.service.AutenticacaoService;
 import br.com.uniaoacabamentos.service.ObraService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -11,38 +14,40 @@ import java.util.List;
 @RequestMapping("/api/obras")
 public class ObraController {
     private final ObraService service;
+    private final AutenticacaoService autenticacaoService;
 
-    public ObraController(ObraService service) {
+    public ObraController(ObraService service, AutenticacaoService autenticacaoService) {
         this.service = service;
+        this.autenticacaoService = autenticacaoService;
     }
 
     @GetMapping
-    public List<Obra> listar() {
+    public List<ObraResponse> listar(HttpServletRequest request) {
+        autenticacaoService.exigirUsuarioAutenticado(request);
         return service.listar();
     }
 
     @GetMapping("/{id}")
-    public Obra buscar(@PathVariable Long id) {
+    public ObraResponse buscar(@PathVariable Long id, HttpServletRequest request) {
+        autenticacaoService.exigirUsuarioAutenticado(request);
         return service.buscar(id);
     }
 
     @PostMapping
-    public Obra salvar(@RequestBody Obra o, @RequestParam Long usuarioLogadoId) {
-        return service.salvar(o, usuarioLogadoId);
+    public ObraResponse salvar(@RequestBody ObraRequest obra, HttpServletRequest request) {
+        return service.salvar(obra, autenticacaoService.exigirUsuarioAutenticado(request));
     }
 
     @PutMapping("/{id}")
-    public Obra atualizar(@PathVariable Long id, @RequestBody Obra o, @RequestParam Long usuarioLogadoId) {
-        return service.atualizar(id, o, usuarioLogadoId);
+    public ObraResponse atualizar(@PathVariable Long id, @RequestBody ObraRequest obra,
+                                  HttpServletRequest request) {
+        return service.atualizar(id, obra, autenticacaoService.exigirUsuarioAutenticado(request));
     }
 
     @PatchMapping("/{id}/status")
-    public Obra status(@PathVariable Long id, @RequestBody StatusRequest req, @RequestParam Long usuarioLogadoId) {
-        return service.alterarStatus(id, req.status(), usuarioLogadoId);
-    }
-
-    @DeleteMapping("/{id}")
-    public void excluir(@PathVariable Long id, @RequestParam Long usuarioLogadoId) {
-        service.excluir(id, usuarioLogadoId);
+    public ObraResponse status(@PathVariable Long id, @RequestBody StatusRequest status,
+                               HttpServletRequest request) {
+        return service.alterarStatus(id, status.status(),
+                autenticacaoService.exigirUsuarioAutenticado(request));
     }
 }

@@ -23,6 +23,7 @@ public class MovimentacaoEstoque {
     private Material material;
     @ManyToOne
     private Obra obra;
+    private LocalDateTime dataUltimaAlteracao;
 
     public Long getId() {
         return id;
@@ -86,5 +87,13 @@ public class MovimentacaoEstoque {
 
     public void setObra(Obra obra) {
         this.obra = obra;
+    }
+
+    public LocalDateTime getDataUltimaAlteracao() {
+        return dataUltimaAlteracao;
+    }
+
+    public void setDataUltimaAlteracao(LocalDateTime dataUltimaAlteracao) {
+        this.dataUltimaAlteracao = dataUltimaAlteracao;
     }
 }

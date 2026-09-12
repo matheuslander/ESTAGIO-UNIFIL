@@ -1,12 +1,18 @@
 package br.com.uniaoacabamentos.service;
 
 import br.com.uniaoacabamentos.dto.MovimentacaoRequest;
+import br.com.uniaoacabamentos.dto.MovimentacaoEdicaoRequest;
+import br.com.uniaoacabamentos.dto.MovimentacaoResponse;
 import br.com.uniaoacabamentos.model.*;
 import br.com.uniaoacabamentos.repository.*;
+import br.com.uniaoacabamentos.util.ValidacaoUtil;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.Normalizer;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -15,129 +21,209 @@ import java.util.List;
 public class MaterialService {
     private final MaterialRepository materialRepository;
     private final MovimentacaoEstoqueRepository movimentacaoRepository;
-    private final UsuarioRepository usuarioRepository;
     private final ObraRepository obraRepository;
-    private final ItemOrcamentoRepository itemOrcamentoRepository;
     private final PermissaoService permissaoService;
 
     public MaterialService(MaterialRepository materialRepository,
                            MovimentacaoEstoqueRepository movimentacaoRepository,
-                           UsuarioRepository usuarioRepository,
                            ObraRepository obraRepository,
-                           ItemOrcamentoRepository itemOrcamentoRepository,
                            PermissaoService permissaoService) {
         this.materialRepository = materialRepository;
         this.movimentacaoRepository = movimentacaoRepository;
-        this.usuarioRepository = usuarioRepository;
         this.obraRepository = obraRepository;
-        this.itemOrcamentoRepository = itemOrcamentoRepository;
         this.permissaoService = permissaoService;
     }
 
-    private Usuario usuario(Long id) {
-        return usuarioRepository.findById(id).orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
+    public List<Material> listar() {
+        return materialRepository.findAllAtivos();
     }
 
-    public List<Material> listar() {
-        return materialRepository.findAll();
+    public List<Material> listarExcluidos(Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        return materialRepository.findAllInativos();
     }
 
     public Material buscar(Long id) {
-        return materialRepository.findById(id).orElseThrow(() -> new RuntimeException("Material não encontrado."));
+        return materialRepository.findAtivoById(id).orElseThrow(() -> new RuntimeException("Material não encontrado."));
     }
 
-    public Material salvar(Material material, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
-        preparar(material);
+    public Material salvar(Material material, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
         validar(material);
+        validarECalcularDimensoes(material, true);
+        preparar(material);
+
+        if (material.getQuantidade() != 0) {
+            throw new RuntimeException("A quantidade inicial deve ser zero. Registre entradas pela aba de entradas e retiradas.");
+        }
 
         validarDuplicidade(material, null);
 
         material.setId(null);
+        material.setAtivo(true);
         material.setDataCadastro(LocalDateTime.now());
         return materialRepository.save(material);
     }
 
-    public Material atualizar(Long id, Material novo, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
-        preparar(novo);
+    public Material atualizar(Long id, Material novo, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
         validar(novo);
+        Material atual = buscar(id);
 
+        preservarDimensoesOmitidas(novo, atual);
+        validarECalcularDimensoes(novo, false);
+        preparar(novo);
         validarDuplicidade(novo, id);
 
-        Material atual = buscar(id);
+        if (novo.getQuantidade() != null && !novo.getQuantidade().equals(atual.getQuantidade())) {
+            throw new RuntimeException("Altere a quantidade de material através da aba de entradas e retiradas.");
+        }
+
         atual.setNome(novo.getNome().trim());
         atual.setDescricao(limpar(novo.getDescricao()));
         atual.setMarca(limpar(novo.getMarca()));
         atual.setCor(limpar(novo.getCor()));
-        atual.setQuantidade(novo.getQuantidade());
         atual.setEstoqueMinimo(novo.getEstoqueMinimo());
         atual.setValorCusto(novo.getValorCusto());
         atual.setValorVenda(novo.getValorVenda());
+        atual.setLarguraPeca(novo.getLarguraPeca());
+        atual.setComprimentoPeca(novo.getComprimentoPeca());
+        atual.setUnidadeMedida(novo.getUnidadeMedida());
+        atual.setAreaPecaM2(novo.getAreaPecaM2());
+        atual.setLarguraPecaCmLegada(novo.getLarguraPecaCmLegada());
+        atual.setComprimentoPecaCmLegada(novo.getComprimentoPecaCmLegada());
+        atual.setAtivo(true);
         return materialRepository.save(atual);
     }
 
-    public void excluir(Long id, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
+    public void excluir(Long id, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
         Material material = buscar(id);
-
-        if (movimentacaoRepository.countByMaterialId(id) > 0) {
-            throw new RuntimeException("Este material possui movimentações de estoque e não pode ser excluído.");
-        }
-
-        if (itemOrcamentoRepository.countByMaterialId(id) > 0) {
-            throw new RuntimeException("Este material está vinculado a orçamentos e não pode ser excluído.");
-        }
-
-        materialRepository.delete(material);
+        material.setAtivo(false);
+        materialRepository.save(material);
     }
 
-    public List<MovimentacaoEstoque> historico() {
-        return movimentacaoRepository.findAll();
+    public Material restaurar(Long id, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        Material material = materialRepository.findInativoById(id)
+                .orElseThrow(() -> new RuntimeException("Material excluído não encontrado."));
+        validar(material);
+        validarECalcularDimensoes(material, false);
+        preparar(material);
+        validarDuplicidade(material, id);
+        material.setAtivo(true);
+        return materialRepository.save(material);
+    }
+
+    @Transactional(readOnly = true)
+    public List<MovimentacaoResponse> historico() {
+        return movimentacaoRepository.findAllByOrderByDataMovimentacaoDescIdDesc().stream()
+                .map(MovimentacaoResponse::from)
+                .toList();
     }
 
     @Transactional
-    public MovimentacaoEstoque movimentar(MovimentacaoRequest req) {
-        Usuario usuario = usuario(req.usuarioId());
-        Material material = buscar(req.materialId());
-        permissaoService.validarMovimentacao(usuario, req.tipo());
-
+    public MovimentacaoResponse movimentar(MovimentacaoRequest req, Usuario usuarioAutenticado) {
+        if (req.materialId() == null) throw new RuntimeException("Material é obrigatório.");
         if (req.tipo() == null) throw new RuntimeException("Tipo de movimentação é obrigatório.");
         if (req.quantidade() == null || req.quantidade() <= 0)
             throw new RuntimeException("Quantidade deve ser maior que zero.");
+        ValidacaoUtil.exigirTextoComLetra(req.observacao(), "Observação", true);
+
+        Material material = materialRepository.findAtivoByIdForUpdate(req.materialId())
+                .orElseThrow(() -> new RuntimeException("Material não encontrado."));
+        permissaoService.validarMovimentacao(usuarioAutenticado, req.tipo());
+
+        Obra obra = null;
+        if (req.obraId() != null) {
+            obra = obraRepository.findAtivaByIdForUpdate(req.obraId())
+                    .orElseThrow(() -> new RuntimeException("Obra vinculada não encontrada."));
+            if (obra.getStatus() == StatusObra.FINALIZADA || obra.getStatus() == StatusObra.CANCELADA) {
+                throw new RuntimeException("Não é possível registrar uma movimentação para esta obra porque ela está com o status "
+                        + obra.getStatus() + ".");
+            }
+        }
 
         if (req.tipo() == TipoMovimentacao.SAIDA) {
-            if (material.getQuantidade() < req.quantidade()) {
-                throw new RuntimeException("Estoque insuficiente para registrar a retirada.");
-            }
-            material.setQuantidade(material.getQuantidade() - req.quantidade());
+            atualizarSaldo(material, (long) material.getQuantidade() - req.quantidade());
         } else {
-            material.setQuantidade(material.getQuantidade() + req.quantidade());
+            atualizarSaldo(material, (long) material.getQuantidade() + req.quantidade());
         }
 
         MovimentacaoEstoque movimentacao = new MovimentacaoEstoque();
-        movimentacao.setUsuario(usuario);
+        movimentacao.setUsuario(usuarioAutenticado);
         movimentacao.setMaterial(material);
         movimentacao.setTipo(req.tipo());
         movimentacao.setQuantidade(req.quantidade());
         movimentacao.setObservacao(limpar(req.observacao()));
+        movimentacao.setDataMovimentacao(LocalDateTime.now());
 
-        if (req.obraId() != null) {
-            Obra obra = obraRepository.findById(req.obraId()).orElseThrow(() -> new RuntimeException("Obra vinculada não encontrada."));
+        if (obra != null) {
             movimentacao.setObra(obra);
         }
 
         materialRepository.save(material);
-        return movimentacaoRepository.save(movimentacao);
+        return MovimentacaoResponse.from(movimentacaoRepository.save(movimentacao));
+    }
+
+    @Transactional
+    public MovimentacaoResponse editarMovimentacao(Long id, MovimentacaoEdicaoRequest req,
+                                                    Usuario usuarioAutenticado) {
+        if (req.quantidade() == null || req.quantidade() <= 0) {
+            throw new RuntimeException("Quantidade deve ser maior que zero.");
+        }
+        ValidacaoUtil.exigirTextoComLetra(req.observacao(), "Observação", true);
+
+        MovimentacaoEstoque movimentacao = movimentacaoRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new RuntimeException("Movimentação não encontrada."));
+        validarPermissaoEdicao(movimentacao, usuarioAutenticado);
+
+        Material material = materialRepository.findAtivoByIdForUpdate(movimentacao.getMaterial().getId())
+                .orElseThrow(() -> new RuntimeException("Material da movimentação não está ativo."));
+
+        long novoSaldo;
+        if (movimentacao.getTipo() == TipoMovimentacao.ENTRADA) {
+            novoSaldo = (long) material.getQuantidade() - movimentacao.getQuantidade() + req.quantidade();
+        } else {
+            novoSaldo = (long) material.getQuantidade() + movimentacao.getQuantidade() - req.quantidade();
+        }
+        atualizarSaldo(material, novoSaldo);
+
+        movimentacao.setQuantidade(req.quantidade());
+        movimentacao.setObservacao(limpar(req.observacao()));
+        movimentacao.setDataUltimaAlteracao(LocalDateTime.now());
+        materialRepository.save(material);
+        return MovimentacaoResponse.from(movimentacaoRepository.save(movimentacao));
+    }
+
+    private void validarPermissaoEdicao(MovimentacaoEstoque movimentacao, Usuario usuarioAutenticado) {
+        if (permissaoService.isAdministrador(usuarioAutenticado)) return;
+        boolean retiradaPropria = movimentacao.getTipo() == TipoMovimentacao.SAIDA
+                && movimentacao.getUsuario() != null
+                && movimentacao.getUsuario().getId().equals(usuarioAutenticado.getId());
+        if (!retiradaPropria) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Usuário comum só pode editar as próprias retiradas.");
+        }
+    }
+
+    private void atualizarSaldo(Material material, long saldoCalculado) {
+        if (saldoCalculado < 0) {
+            throw new RuntimeException("Estoque insuficiente para concluir a movimentação.");
+        }
+        if (saldoCalculado > Integer.MAX_VALUE) {
+            throw new RuntimeException("A quantidade resultante ultrapassa o limite permitido.");
+        }
+        material.setQuantidade((int) saldoCalculado);
     }
 
     private void validarDuplicidade(Material material, Long idIgnorado) {
-        boolean duplicado = materialRepository.findAll().stream()
+        boolean duplicado = materialRepository.findAllAtivos().stream()
                 .filter(cadastrado -> idIgnorado == null || !cadastrado.getId().equals(idIgnorado))
                 .anyMatch(cadastrado -> materialEhSemelhante(cadastrado, material));
 
         if (duplicado) {
-            throw new RuntimeException("Já existe um material cadastrado com o mesmo nome e a mesma cor ou descrição. Materiais iguais só podem ser cadastrados quando a cor e a descrição forem diferentes.");
+            throw new RuntimeException("Já existe um material cadastrado com o mesmo nome, marca e cor. Para diferenciar o material, altere pelo menos um desses campos.");
         }
     }
 
@@ -148,16 +234,10 @@ public class MaterialService {
         String marcaNovo = normalizar(novo.getMarca());
         String corExistente = normalizar(existente.getCor());
         String corNovo = normalizar(novo.getCor());
-        String descricaoExistente = normalizar(existente.getDescricao());
-        String descricaoNovo = normalizar(novo.getDescricao());
 
-        if (nomeExistente.isBlank() || nomeNovo.isBlank() || !nomeExistente.equals(nomeNovo)) return false;
-        if (!marcaExistente.isBlank() && !marcaNovo.isBlank() && !marcaExistente.equals(marcaNovo)) return false;
-
-        boolean mesmaCorPreenchida = !corExistente.isBlank() && !corNovo.isBlank() && corExistente.equals(corNovo);
-        boolean mesmaDescricaoPreenchida = !descricaoExistente.isBlank() && !descricaoNovo.isBlank() && descricaoExistente.equals(descricaoNovo);
-
-        return mesmaCorPreenchida || mesmaDescricaoPreenchida;
+        return !nomeExistente.isBlank() && !nomeNovo.isBlank() && nomeExistente.equals(nomeNovo)
+                && !marcaExistente.isBlank() && !marcaNovo.isBlank() && marcaExistente.equals(marcaNovo)
+                && !corExistente.isBlank() && !corNovo.isBlank() && corExistente.equals(corNovo);
     }
 
     private String normalizar(String texto) {
@@ -176,15 +256,66 @@ public class MaterialService {
         if (material.getValorVenda() == null) material.setValorVenda(BigDecimal.ZERO);
     }
 
+    private void preservarDimensoesOmitidas(Material novo, Material atual) {
+        atual.migrarDimensoesLegadas();
+        if (novo.getLarguraPeca() == null && novo.getComprimentoPeca() == null
+                && novo.getUnidadeMedida() == null) {
+            novo.setLarguraPeca(atual.getLarguraPeca());
+            novo.setComprimentoPeca(atual.getComprimentoPeca());
+            novo.setUnidadeMedida(atual.getUnidadeMedida());
+        }
+    }
+
+    private void validarECalcularDimensoes(Material material, boolean obrigatorias) {
+        material.migrarDimensoesLegadas();
+        BigDecimal largura = material.getLarguraPeca();
+        BigDecimal comprimento = material.getComprimentoPeca();
+
+        if (largura == null && comprimento == null && material.getUnidadeMedida() == null && !obrigatorias) {
+            material.setAreaPecaM2(null);
+            return;
+        }
+        if (largura == null) throw new RuntimeException("Largura da peça é obrigatória.");
+        if (comprimento == null) throw new RuntimeException("Comprimento da peça é obrigatório.");
+        if (material.getUnidadeMedida() == null) throw new RuntimeException("Unidade de medida é obrigatória.");
+        if (largura.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("Largura da peça deve ser maior que zero.");
+        }
+        if (comprimento.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("Comprimento da peça deve ser maior que zero.");
+        }
+
+        largura = largura.setScale(4, RoundingMode.HALF_UP);
+        comprimento = comprimento.setScale(4, RoundingMode.HALF_UP);
+        BigDecimal larguraMetros = material.getUnidadeMedida().paraMetros(largura);
+        BigDecimal comprimentoMetros = material.getUnidadeMedida().paraMetros(comprimento);
+        BigDecimal area = larguraMetros.multiply(comprimentoMetros)
+                .setScale(6, RoundingMode.HALF_UP);
+        if (area.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("As dimensões informadas resultam em uma área inválida para a peça.");
+        }
+
+        material.setLarguraPeca(largura);
+        material.setComprimentoPeca(comprimento);
+        material.setAreaPecaM2(area);
+        material.sincronizarDimensoesLegadas(larguraMetros, comprimentoMetros);
+    }
+
     private void validar(Material material) {
-        if (material.getNome() == null || material.getNome().isBlank())
-            throw new RuntimeException("Nome do material é obrigatório.");
-        if (material.getQuantidade() < 0) throw new RuntimeException("Quantidade não pode ser negativa.");
-        if (material.getEstoqueMinimo() < 0) throw new RuntimeException("Estoque mínimo não pode ser negativo.");
-        if (material.getValorCusto().compareTo(BigDecimal.ZERO) < 0)
-            throw new RuntimeException("Valor de custo não pode ser negativo.");
-        if (material.getValorVenda().compareTo(BigDecimal.ZERO) < 0)
-            throw new RuntimeException("Valor de venda não pode ser negativo.");
+        ValidacaoUtil.exigirTextoComLetra(material.getNome(), "Nome do material", true);
+        ValidacaoUtil.exigirTextoComLetra(material.getMarca(), "Marca do material", true);
+        ValidacaoUtil.exigirTextoComLetra(material.getCor(), "Cor do material", true);
+        ValidacaoUtil.exigirTextoComLetra(material.getDescricao(), "Descrição do material", true);
+
+        if (material.getQuantidade() == null) throw new RuntimeException("Quantidade é obrigatória.");
+        if (material.getEstoqueMinimo() == null) throw new RuntimeException("Estoque mínimo é obrigatório.");
+        if (material.getValorCusto() == null) throw new RuntimeException("Valor de custo é obrigatório.");
+        if (material.getValorVenda() == null) throw new RuntimeException("Valor de venda é obrigatório.");
+
+        ValidacaoUtil.exigirInteiroNaoNegativo(material.getQuantidade(), "Quantidade");
+        ValidacaoUtil.exigirInteiroNaoNegativo(material.getEstoqueMinimo(), "Estoque mínimo");
+        ValidacaoUtil.exigirDecimalNaoNegativo(material.getValorCusto(), "Valor de custo");
+        ValidacaoUtil.exigirDecimalNaoNegativo(material.getValorVenda(), "Valor de venda");
     }
 
     private String limpar(String texto) {

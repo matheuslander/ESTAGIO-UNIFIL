@@ -1,108 +1,136 @@
 package br.com.uniaoacabamentos.service;
 
+import br.com.uniaoacabamentos.model.StatusUsuario;
+import br.com.uniaoacabamentos.model.TipoUsuario;
 import br.com.uniaoacabamentos.model.Usuario;
-import br.com.uniaoacabamentos.repository.OrcamentoRepository;
 import br.com.uniaoacabamentos.repository.UsuarioRepository;
+import br.com.uniaoacabamentos.util.ValidacaoUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Locale;
 
 @Service
 public class UsuarioService {
     private final UsuarioRepository repository;
-    private final OrcamentoRepository orcamentoRepository;
     private final PermissaoService permissaoService;
     private final PasswordEncoder passwordEncoder;
 
-    public UsuarioService(UsuarioRepository repository,
-                          OrcamentoRepository orcamentoRepository,
-                          PermissaoService permissaoService,
+    public UsuarioService(UsuarioRepository repository, PermissaoService permissaoService,
                           PasswordEncoder passwordEncoder) {
         this.repository = repository;
-        this.orcamentoRepository = orcamentoRepository;
         this.permissaoService = permissaoService;
         this.passwordEncoder = passwordEncoder;
     }
 
-    private Usuario logado(Long id) {
-        return repository.findById(id).orElseThrow(() -> new RuntimeException("Usuário logado não encontrado."));
+    public List<Usuario> listar(Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        return repository.findAtivos(StatusUsuario.ATIVO);
     }
 
-    public List<Usuario> listar(Long logadoId) {
-        permissaoService.exigirAdministrador(logado(logadoId));
-        return repository.findAll();
+    public List<Usuario> listarExcluidos(Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        return repository.findInativos(StatusUsuario.INATIVO);
     }
 
-    public Usuario salvar(Usuario usuario, Long logadoId) {
-        permissaoService.exigirAdministrador(logado(logadoId));
-        validar(usuario, null, true);
-
-        if (repository.existsByLogin(usuario.getLogin().trim())) {
-            throw new RuntimeException("Já existe um usuário cadastrado com esse login.");
+    @Transactional
+    public Usuario salvar(Usuario usuario, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        validar(usuario, true);
+        String loginNormalizado = normalizarLogin(usuario.getLogin());
+        if (repository.existsByLoginIgnoreCase(loginNormalizado)) {
+            throw new RuntimeException("Já existe um usuário cadastrado com este login.");
         }
 
         usuario.setId(null);
         usuario.setNome(usuario.getNome().trim());
-        usuario.setLogin(usuario.getLogin().trim());
+        usuario.setLogin(loginNormalizado);
         usuario.setSenha(passwordEncoder.encode(usuario.getSenha()));
-        if (usuario.getAtivo() == null) usuario.setAtivo(true);
+        usuario.setTipoUsuario(usuario.getTipoUsuario().normalizado());
+        usuario.setStatus(StatusUsuario.ATIVO);
+        usuario.setCaminhoFoto(null);
+        usuario.setUltimoAcesso(null);
         return repository.save(usuario);
     }
 
-    public Usuario atualizar(Long id, Usuario novo, Long logadoId) {
-        permissaoService.exigirAdministrador(logado(logadoId));
-        validar(novo, id, false);
-
-        if (repository.existsByLoginAndIdNot(novo.getLogin().trim(), id)) {
-            throw new RuntimeException("Já existe outro usuário cadastrado com esse login.");
+    @Transactional
+    public Usuario atualizar(Long id, Usuario novo, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        validar(novo, false);
+        String loginNormalizado = normalizarLogin(novo.getLogin());
+        if (repository.existsByLoginIgnoreCaseAndIdNot(loginNormalizado, id)) {
+            throw new RuntimeException("Já existe um usuário cadastrado com este login.");
         }
 
-        Usuario atual = repository.findById(id).orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
-        atual.setNome(novo.getNome().trim());
-        atual.setLogin(novo.getLogin().trim());
+        Usuario atual = repository.findAtivoById(id, StatusUsuario.ATIVO)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
+        TipoUsuario novoTipo = novo.getTipoUsuario().normalizado();
+        if (atual.getTipoUsuario() == TipoUsuario.ADMINISTRADOR && novoTipo != TipoUsuario.ADMINISTRADOR) {
+            garantirOutroAdministradorAtivo(atual);
+        }
 
+        atual.setNome(novo.getNome().trim());
+        atual.setLogin(loginNormalizado);
         if (novo.getSenha() != null && !novo.getSenha().isBlank()) {
             atual.setSenha(passwordEncoder.encode(novo.getSenha()));
         }
-
-        atual.setTipoUsuario(novo.getTipoUsuario());
-        atual.setAtivo(novo.getAtivo() == null ? true : novo.getAtivo());
+        atual.setTipoUsuario(novoTipo);
         return repository.save(atual);
     }
 
-    public Usuario status(Long id, Boolean ativo, Long logadoId) {
-        permissaoService.exigirAdministrador(logado(logadoId));
-
-        if (id.equals(logadoId) && Boolean.FALSE.equals(ativo)) {
+    @Transactional
+    public Usuario status(Long id, StatusUsuario status, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        if (status == null) throw new RuntimeException("Status do usuário é obrigatório.");
+        if (id.equals(usuarioAutenticado.getId()) && status == StatusUsuario.INATIVO) {
             throw new RuntimeException("O usuário logado não pode inativar a própria conta.");
         }
 
-        Usuario usuario = repository.findById(id).orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
-        usuario.setAtivo(ativo);
+        Usuario usuario = repository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
+        if (status == StatusUsuario.INATIVO && usuario.getTipoUsuario() == TipoUsuario.ADMINISTRADOR) {
+            garantirOutroAdministradorAtivo(usuario);
+        }
+        usuario.setStatus(status);
         return repository.save(usuario);
     }
 
-    public void excluir(Long id, Long logadoId) {
-        permissaoService.exigirAdministrador(logado(logadoId));
-
-        if (id.equals(logadoId)) {
-            throw new RuntimeException("O usuário logado não pode excluir a própria conta.");
-        }
-
-        if (orcamentoRepository.countByUsuarioId(id) > 0) {
-            throw new RuntimeException("Este usuário possui orçamentos vinculados e não pode ser excluído.");
-        }
-
-        repository.deleteById(id);
+    public void inativar(Long id, Usuario usuarioAutenticado) {
+        status(id, StatusUsuario.INATIVO, usuarioAutenticado);
     }
 
-    private void validar(Usuario usuario, Long idAtual, boolean exigirSenha) {
+    @Transactional
+    public Usuario restaurar(Long id, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        Usuario usuario = repository.findInativoById(id, StatusUsuario.INATIVO)
+                .orElseThrow(() -> new RuntimeException("Usuário inativo não encontrado."));
+        usuario.setStatus(StatusUsuario.ATIVO);
+        return repository.save(usuario);
+    }
+
+    private void garantirOutroAdministradorAtivo(Usuario usuarioAlterado) {
+        if (usuarioAlterado.getTipoUsuario() == TipoUsuario.ADMINISTRADOR
+                && repository.bloquearAdministradoresAtivos(
+                        TipoUsuario.ADMINISTRADOR, StatusUsuario.ATIVO).size() <= 1) {
+            throw new RuntimeException("Não é possível realizar esta operação, pois o sistema deve possuir pelo menos um administrador ativo.");
+        }
+    }
+
+    private String normalizarLogin(String login) {
+        return login.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private void validar(Usuario usuario, boolean exigirSenha) {
+        if (usuario == null) throw new RuntimeException("Dados do usuário são obrigatórios.");
         if (usuario.getNome() == null || usuario.getNome().isBlank()) throw new RuntimeException("Nome obrigatório.");
-        if (usuario.getLogin() == null || usuario.getLogin().isBlank())
-            throw new RuntimeException("Login obrigatório.");
-        if (exigirSenha && (usuario.getSenha() == null || usuario.getSenha().isBlank()))
+        if (usuario.getLogin() == null || usuario.getLogin().isBlank()) throw new RuntimeException("Login obrigatório.");
+        ValidacaoUtil.exigirTextoComLetra(usuario.getNome(), "Nome do usuário", true);
+        ValidacaoUtil.exigirTextoComLetra(usuario.getLogin(), "Login do usuário", true);
+        if (exigirSenha && (usuario.getSenha() == null || usuario.getSenha().isBlank())) {
             throw new RuntimeException("Senha obrigatória.");
+        }
         if (usuario.getTipoUsuario() == null) throw new RuntimeException("Tipo de usuário obrigatório.");
     }
 }

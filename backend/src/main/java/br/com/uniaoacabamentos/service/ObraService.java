@@ -1,152 +1,173 @@
 package br.com.uniaoacabamentos.service;
 
+import br.com.uniaoacabamentos.dto.ObraRequest;
+import br.com.uniaoacabamentos.dto.ObraResponse;
 import br.com.uniaoacabamentos.model.*;
-import br.com.uniaoacabamentos.repository.*;
+import br.com.uniaoacabamentos.repository.ObraRepository;
+import br.com.uniaoacabamentos.repository.OrcamentoRepository;
+import br.com.uniaoacabamentos.util.ValidacaoUtil;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.text.Normalizer;
+import java.time.LocalDateTime;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
 
 @Service
 public class ObraService {
     private final ObraRepository obraRepository;
-    private final UsuarioRepository usuarioRepository;
-    private final MovimentacaoEstoqueRepository movimentacaoRepository;
     private final OrcamentoRepository orcamentoRepository;
     private final PermissaoService permissaoService;
 
     public ObraService(ObraRepository obraRepository,
-                       UsuarioRepository usuarioRepository,
-                       MovimentacaoEstoqueRepository movimentacaoRepository,
                        OrcamentoRepository orcamentoRepository,
                        PermissaoService permissaoService) {
         this.obraRepository = obraRepository;
-        this.usuarioRepository = usuarioRepository;
-        this.movimentacaoRepository = movimentacaoRepository;
         this.orcamentoRepository = orcamentoRepository;
         this.permissaoService = permissaoService;
     }
 
-    private Usuario usuario(Long id) {
-        return usuarioRepository.findById(id).orElseThrow(() -> new RuntimeException("Usuário não encontrado."));
+    @Transactional(readOnly = true)
+    public List<ObraResponse> listar() {
+        return obraRepository.findAllAtivas().stream().map(ObraResponse::from).toList();
     }
 
-    public List<Obra> listar() {
-        return obraRepository.findAll();
+    @Transactional(readOnly = true)
+    public ObraResponse buscar(Long id) {
+        return ObraResponse.from(buscarEntidade(id));
     }
 
-    public Obra buscar(Long id) {
-        return obraRepository.findById(id).orElseThrow(() -> new RuntimeException("Obra não encontrada."));
-    }
-
-    public Obra salvar(Obra obra, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
-        preparar(obra);
-        validar(obra);
-
-        if (existeDuplicada(obra, null)) {
-            throw new RuntimeException("Já existe uma obra semelhante cadastrada em aberto. Só é permitido repetir uma obra quando a anterior estiver finalizada.");
+    @Transactional
+    public ObraResponse salvar(ObraRequest request, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        validarDadosProprios(request);
+        if (request.orcamentoId() == null) {
+            throw new RuntimeException("Orçamento de origem é obrigatório para cadastrar uma nova obra.");
         }
 
-        obra.setId(null);
-        return obraRepository.save(obra);
+        Orcamento orcamento = orcamentoRepository.findByIdForUpdate(request.orcamentoId())
+                .orElseThrow(() -> new RuntimeException("Orçamento de origem não encontrado."));
+        validarOrcamentoDisponivel(orcamento);
+
+        Obra obra = new Obra();
+        obra.setNomeObra(request.nomeObra().trim());
+        obra.setNomeCliente(orcamento.getNomeCliente().trim());
+        obra.setEndereco(limpar(request.endereco()));
+        obra.setDescricao(limpar(request.descricao()));
+        obra.setMetragem(orcamento.getAreaObraM2().doubleValue());
+        obra.setValorContratado(orcamento.getValorTotal());
+        obra.setDataInicio(request.dataInicio());
+        obra.setStatus(StatusObra.CADASTRADA);
+        obra.setAtivo(true);
+
+        validarDuplicidade(obra, null);
+        Obra salva = obraRepository.save(obra);
+
+        orcamento.setObra(salva);
+        orcamento.setStatus(StatusOrcamento.CONTRATADO);
+        salva.setOrcamento(orcamento);
+        orcamentoRepository.save(orcamento);
+
+        return ObraResponse.from(salva);
     }
 
-    public Obra atualizar(Long id, Obra novo, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
-        preparar(novo);
-        validar(novo);
+    @Transactional
+    public ObraResponse atualizar(Long id, ObraRequest request, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
+        validarDadosProprios(request);
+        Obra atual = buscarEntidade(id);
 
-        if (existeDuplicada(novo, id)) {
-            throw new RuntimeException("Já existe outra obra semelhante cadastrada em aberto. Só é permitido repetir uma obra quando a anterior estiver finalizada.");
+        if (request.orcamentoId() != null) {
+            Long orcamentoAtualId = atual.getOrcamento() == null ? null : atual.getOrcamento().getId();
+            if (!Objects.equals(request.orcamentoId(), orcamentoAtualId)) {
+                throw new RuntimeException("O orçamento de origem da obra não pode ser alterado.");
+            }
         }
 
-        Obra atual = buscar(id);
-        atual.setNomeObra(novo.getNomeObra().trim());
-        atual.setNomeCliente(novo.getNomeCliente().trim());
-        atual.setEndereco(limpar(novo.getEndereco()));
-        atual.setDescricao(limpar(novo.getDescricao()));
-        atual.setMetragem(novo.getMetragem());
-        atual.setValorOrcamento(novo.getValorOrcamento());
-        atual.setStatus(novo.getStatus());
-        atual.setDataInicio(novo.getDataInicio());
-        return obraRepository.save(atual);
+        Obra candidato = new Obra();
+        candidato.setNomeObra(request.nomeObra().trim());
+        candidato.setNomeCliente(atual.getNomeCliente());
+        candidato.setEndereco(limpar(request.endereco()));
+        validarDuplicidade(candidato, id);
+
+        atual.setNomeObra(candidato.getNomeObra());
+        atual.setEndereco(candidato.getEndereco());
+        atual.setDescricao(limpar(request.descricao()));
+        atual.setDataInicio(request.dataInicio());
+        if (request.status() != null) aplicarTransicao(atual, request.status());
+        atual.setAtivo(true);
+        // Cliente, metragem e valores contratados permanecem os do orçamento.
+        return ObraResponse.from(obraRepository.save(atual));
     }
 
-    public Obra alterarStatus(Long id, StatusObra status, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
+    @Transactional
+    public ObraResponse alterarStatus(Long id, StatusObra status, Usuario usuarioAutenticado) {
+        permissaoService.exigirAdministrador(usuarioAutenticado);
         if (status == null) throw new RuntimeException("Status da obra é obrigatório.");
-        Obra obra = buscar(id);
-        obra.setStatus(status);
-        return obraRepository.save(obra);
+        Obra obra = buscarEntidade(id);
+        aplicarTransicao(obra, status);
+        return ObraResponse.from(obraRepository.save(obra));
     }
 
-    public void excluir(Long id, Long usuarioId) {
-        permissaoService.exigirAdministrador(usuario(usuarioId));
-        Obra obra = buscar(id);
+    private Obra buscarEntidade(Long id) {
+        return obraRepository.findAtivaById(id)
+                .orElseThrow(() -> new RuntimeException("Obra não encontrada."));
+    }
 
-        if (movimentacaoRepository.countByObraId(id) > 0) {
-            throw new RuntimeException("Esta obra possui movimentações de estoque vinculadas e não pode ser excluída.");
+    private void validarOrcamentoDisponivel(Orcamento orcamento) {
+        if (orcamento.getTipoOrcamento() != TipoOrcamento.OBRA) {
+            throw new RuntimeException("Somente orçamento de obra pode originar uma obra.");
         }
-
-        if (orcamentoRepository.countByObraId(id) > 0) {
-            throw new RuntimeException("Esta obra possui orçamentos vinculados e não pode ser excluída.");
+        if (orcamento.getStatus() != StatusOrcamento.CALCULADO) {
+            throw new RuntimeException("Apenas orçamento com status CALCULADO pode originar uma obra.");
         }
-
-        obraRepository.delete(obra);
+        if (orcamento.getObra() != null) {
+            throw new RuntimeException("Este orçamento já foi utilizado por outra obra.");
+        }
+        if (orcamento.getNomeCliente() == null || orcamento.getNomeCliente().isBlank()
+                || orcamento.getAreaObraM2() == null || orcamento.getAreaObraM2().signum() <= 0
+                || orcamento.getQuantidadePecas() == null || orcamento.getQuantidadePecas() <= 0
+                || orcamento.getValorTotal() == null || orcamento.getValorTotal().signum() < 0) {
+            throw new RuntimeException("O orçamento não possui todos os dados calculados necessários para cadastrar a obra.");
+        }
     }
 
-    private boolean existeDuplicada(Obra obra, Long idAtual) {
-        String nomeObra = normalizar(obra.getNomeObra());
-        String nomeCliente = normalizar(obra.getNomeCliente());
-        String endereco = normalizar(obra.getEndereco());
-        String descricao = normalizar(obra.getDescricao());
-
-        return obraRepository.findAll().stream().anyMatch(existente -> {
-            if (idAtual != null && Objects.equals(existente.getId(), idAtual)) {
-                return false;
-            }
-
-            if (existente.getStatus() == StatusObra.FINALIZADA) {
-                return false;
-            }
-
-            return normalizar(existente.getNomeObra()).equals(nomeObra)
-                    && normalizar(existente.getNomeCliente()).equals(nomeCliente)
-                    && normalizar(existente.getEndereco()).equals(endereco)
-                    && normalizar(existente.getDescricao()).equals(descricao);
-        });
+    private void validarDadosProprios(ObraRequest request) {
+        if (request == null) throw new RuntimeException("Dados da obra são obrigatórios.");
+        ValidacaoUtil.exigirTextoComLetra(request.nomeObra(), "Nome da obra", true);
+        ValidacaoUtil.exigirTextoComLetra(request.endereco(), "Endereço", true);
+        ValidacaoUtil.exigirTextoComLetra(request.descricao(), "Descrição da obra", true);
     }
 
-    private String normalizar(String texto) {
-        if (texto == null) return "";
-        String semAcentos = Normalizer.normalize(texto, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}", "");
-        return semAcentos.toLowerCase()
-                .replaceAll("[^a-z0-9]", "")
-                .trim();
-    }
-
-    private void preparar(Obra obra) {
-        if (obra.getStatus() == null) obra.setStatus(StatusObra.CADASTRADA);
-        if (obra.getMetragem() == null) obra.setMetragem(0.0);
-        if (obra.getValorOrcamento() == null) obra.setValorOrcamento(BigDecimal.ZERO);
-        if (obra.getEndereco() == null) obra.setEndereco("");
-    }
-
-    private void validar(Obra obra) {
-        if (obra.getNomeObra() == null || obra.getNomeObra().isBlank())
-            throw new RuntimeException("Nome da obra é obrigatório.");
-        if (obra.getNomeCliente() == null || obra.getNomeCliente().isBlank())
-            throw new RuntimeException("Nome do cliente é obrigatório.");
-        if (obra.getMetragem() < 0) throw new RuntimeException("Metragem não pode ser negativa.");
-        if (obra.getValorOrcamento().compareTo(BigDecimal.ZERO) < 0)
-            throw new RuntimeException("Valor do orçamento não pode ser negativo.");
+    private void validarDuplicidade(Obra obra, Long idAtual) {
+        if (obraRepository.contarDuplicadas(
+                obra.getNomeObra().trim(), obra.getNomeCliente().trim(),
+                obra.getEndereco() == null ? "" : obra.getEndereco().trim(), idAtual) > 0) {
+            throw new RuntimeException("Já existe uma obra com o mesmo nome, cliente e endereço.");
+        }
     }
 
     private String limpar(String texto) {
         return texto == null ? null : texto.trim();
+    }
+
+    private void aplicarTransicao(Obra obra, StatusObra novoStatus) {
+        StatusObra atual = obra.getStatus();
+        if (novoStatus == atual) return;
+
+        EnumSet<StatusObra> permitidos = switch (atual) {
+            case CADASTRADA -> EnumSet.of(StatusObra.EM_ANDAMENTO, StatusObra.CANCELADA);
+            case EM_ANDAMENTO -> EnumSet.of(StatusObra.PAUSADA, StatusObra.FINALIZADA, StatusObra.CANCELADA);
+            case PAUSADA -> EnumSet.of(StatusObra.EM_ANDAMENTO, StatusObra.CANCELADA);
+            case FINALIZADA, CANCELADA -> EnumSet.noneOf(StatusObra.class);
+        };
+        if (!permitidos.contains(novoStatus)) {
+            throw new RuntimeException("Transição de status não permitida: " + atual + " → " + novoStatus + ".");
+        }
+        obra.setStatus(novoStatus);
+        if (novoStatus == StatusObra.FINALIZADA) {
+            obra.setDataFinalizacao(LocalDateTime.now());
+        }
     }
 }

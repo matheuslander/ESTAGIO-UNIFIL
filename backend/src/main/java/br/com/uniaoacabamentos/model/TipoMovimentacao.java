@@ -1,3 +1,6 @@
 package br.com.uniaoacabamentos.model;
 
-public enum TipoMovimentacao {ENTRADA, SAIDA}
+public enum TipoMovimentacao {
+    ENTRADA,
+    SAIDA
+}

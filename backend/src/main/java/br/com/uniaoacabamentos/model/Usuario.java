@@ -21,8 +21,22 @@ public class Usuario {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private TipoUsuario tipoUsuario;
+    @Enumerated(EnumType.STRING)
+    private StatusUsuario status;
+    private String caminhoFoto;
+    private LocalDateTime ultimoAcesso;
+    /** Coluna legada sincronizada com status para preservar dados existentes. */
     private Boolean ativo = true;
     private LocalDateTime dataCriacao = LocalDateTime.now();
+
+    @PrePersist
+    @PreUpdate
+    public void sincronizarCompatibilidade() {
+        if (status == null) status = Boolean.FALSE.equals(ativo) ? StatusUsuario.INATIVO : StatusUsuario.ATIVO;
+        ativo = status == StatusUsuario.ATIVO;
+        if (tipoUsuario != null) tipoUsuario = tipoUsuario.normalizado();
+        if (dataCriacao == null) dataCriacao = LocalDateTime.now();
+    }
 
     public Long getId() {
         return id;
@@ -64,12 +78,44 @@ public class Usuario {
         this.tipoUsuario = tipoUsuario;
     }
 
+    public StatusUsuario getStatus() {
+        return status == null
+                ? (Boolean.FALSE.equals(ativo) ? StatusUsuario.INATIVO : StatusUsuario.ATIVO)
+                : status;
+    }
+
+    public boolean temStatusPersistido() {
+        return status != null;
+    }
+
+    public void setStatus(StatusUsuario status) {
+        this.status = status;
+        if (status != null) this.ativo = status == StatusUsuario.ATIVO;
+    }
+
+    public String getCaminhoFoto() {
+        return caminhoFoto;
+    }
+
+    public void setCaminhoFoto(String caminhoFoto) {
+        this.caminhoFoto = caminhoFoto;
+    }
+
+    public LocalDateTime getUltimoAcesso() {
+        return ultimoAcesso;
+    }
+
+    public void setUltimoAcesso(LocalDateTime ultimoAcesso) {
+        this.ultimoAcesso = ultimoAcesso;
+    }
+
     public Boolean getAtivo() {
         return ativo;
     }
 
     public void setAtivo(Boolean ativo) {
         this.ativo = ativo;
+        if (ativo != null) this.status = ativo ? StatusUsuario.ATIVO : StatusUsuario.INATIVO;
     }
 
     public LocalDateTime getDataCriacao() {
